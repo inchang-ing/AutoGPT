@@ -22,7 +22,7 @@ jobs:
         shell: bash
         working-directory: autogpt_platform/backend
     env:
-      TARGET_SHA: 64925b2e0e1c59790152540f499c3b35d795a2dd
+      TARGET_SHA: dbfe17569532353448e9577b2f62d1150ac79ee8
       VALIDATION_MODE: baseline
       CI: "true"
       PLAIN_OUTPUT: "true"
@@ -33,7 +33,7 @@ jobs:
       - name: Checkout the reviewed source commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: 64925b2e0e1c59790152540f499c3b35d795a2dd
+          ref: dbfe17569532353448e9577b2f62d1150ac79ee8
           persist-credentials: false
 
       - name: Verify the source and validation mode
@@ -89,7 +89,7 @@ jobs:
             --junitxml=linux-validation/mandatory.xml \
             2>&1 | tee linux-validation/mandatory.log
 
-      - name: Run the four timezone regression functions
+      - name: Run the five timezone regression functions
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
@@ -98,6 +98,7 @@ jobs:
             backend/api/features/blocks/routes_test.py::test_execute_graph_block_forwards_execution_context \
             backend/api/features/graph_executions/review/resume_reads_test.py::test_a_resumed_run_reads_its_user_and_settings_side_by_side_then_its_workspace \
             backend/executor/run_start_reads_test.py::test_a_new_run_reads_its_user_and_settings_side_by_side_then_its_workspace \
+            backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone \
             --junitxml=linux-validation/regressions.xml \
             2>&1 | tee linux-validation/regressions.log
 
