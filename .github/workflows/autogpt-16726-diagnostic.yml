@@ -1,4 +1,4 @@
-name: AutoGPT 16726 bounded hang diagnosis
+name: AutoGPT 16726 bounded exit diagnosis
 
 on:
   push:
@@ -13,20 +13,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  diagnose:
+  exit-diagnose:
     if: github.repository == 'inchang-ing/AutoGPT'
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
         include:
-          - mode: original-pr
-            sha: ba7417993c987db84301a8c8898d81cfd7057f25
-          - mode: test-only
-            sha: dbfe17569532353448e9577b2f62d1150ac79ee8
-          - mode: final
-            sha: 623b2cac752f85ff4e79e7b202a9e969d5291da7
+          - mode: final17-no-cov
+          - mode: final35-no-cov
+          - mode: final35-focused-cov
     services:
       clamav:
         image: clamav/clamav-debian:latest
@@ -51,7 +48,7 @@ jobs:
         shell: bash
         working-directory: autogpt_platform/backend
     env:
-      TARGET_SHA: ${{ matrix.sha }}
+      TARGET_SHA: 623b2cac752f85ff4e79e7b202a9e969d5291da7
       VALIDATION_MODE: ${{ matrix.mode }}
       CI: "true"
       PLAIN_OUTPUT: "true"
@@ -62,13 +59,13 @@ jobs:
       - name: Checkout the reviewed source commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: ${{ matrix.sha }}
+          ref: 623b2cac752f85ff4e79e7b202a9e969d5291da7
           persist-credentials: false
 
       - name: Verify the source and validation mode
         run: |
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
-          case "$VALIDATION_MODE" in original-pr|test-only|final) ;; *) exit 1 ;; esac
+          case "$VALIDATION_MODE" in final17-no-cov|final35-no-cov|final35-focused-cov) ;; *) exit 1 ;; esac
           printf 'source=%s\nmode=%s\n' "$TARGET_SHA" "$VALIDATION_MODE"
 
       - name: Set up Python 3.12
@@ -134,70 +131,60 @@ jobs:
             exit 1
           fi
 
-      # Mandatory architecture and block harness already ran on the exact final SHA.
-      # This independent diagnostic leaves that run and its results intact.
-      - name: Diagnose all six complete files without changing their test policy
+      - name: Diagnose pytest reporting and teardown without altering test hooks
         run: |
           set -uo pipefail
           mkdir -p linux-validation
-          set +e
-          timeout --signal=INT --kill-after=15s 240s \
-            poetry run pytest -vv --tb=short -o faulthandler_timeout=60 \
-            backend/blocks/time_blocks_test.py \
-            backend/api/external/v1/routes_test.py \
-            backend/api/features/blocks/routes_test.py \
-            backend/api/features/graph_executions/review/resume_reads_test.py \
-            backend/executor/run_start_reads_test.py \
-            backend/copilot/tools/helpers_test.py \
-            --cov=backend \
-            --cov-branch \
-            --cov-report=term-missing \
-            --cov-report=json:linux-validation/full-six-coverage.json \
-            --cov-report=xml:linux-validation/full-six-coverage.xml \
-            --junitxml=linux-validation/full-six.xml \
-            2>&1 | tee linux-validation/full-six.log
-          command_status=("${PIPESTATUS[@]}")
-          printf 'command_exit=%s\ntee_exit=%s\n' "${command_status[0]}" "${command_status[1]}" > linux-validation/full-six-exit-codes.txt
-          if (( command_status[0] != 0 )); then
-            exit "${command_status[0]}"
+          pytest_args=(
+            -vv --tb=short
+            -o faulthandler_timeout=0
+            --junitxml=linux-validation/exit-diagnostic.xml
+            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[not-set-True-+0900]'
+            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[UTC-True-+0000]'
+            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[Invalid/Timezone-True-+0000]'
+            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[None-True-+0000]'
+            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[UTC-False-+0900]'
+            'backend/api/features/blocks/routes_test.py::test_execute_graph_block_forwards_execution_context[America/New_York]'
+            'backend/api/features/blocks/routes_test.py::test_execute_graph_block_forwards_execution_context[not-set]'
+            'backend/api/features/graph_executions/review/resume_reads_test.py::test_a_resumed_run_reads_its_user_and_settings_side_by_side_then_its_workspace[Europe/Paris]'
+            'backend/api/features/graph_executions/review/resume_reads_test.py::test_a_resumed_run_reads_its_user_and_settings_side_by_side_then_its_workspace[not-set]'
+            'backend/executor/run_start_reads_test.py::test_a_new_run_reads_its_user_and_settings_side_by_side_then_its_workspace[Europe/Paris]'
+            'backend/executor/run_start_reads_test.py::test_a_new_run_reads_its_user_and_settings_side_by_side_then_its_workspace[not-set]'
+            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[not-set-True-+0900]'
+            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[Asia/Kolkata-True-+0530]'
+            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[UTC-True-+0000]'
+            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[Invalid/Timezone-True-+0000]'
+            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[None-True-+0000]'
+            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[UTC-False-+0900]'
+          )
+          case "$VALIDATION_MODE" in
+            final17-no-cov) ;;
+            final35-no-cov|final35-focused-cov)
+              pytest_args+=(backend/blocks/time_blocks_test.py)
+              ;;
+            *) exit 1 ;;
+          esac
+          if [[ "$VALIDATION_MODE" == "final35-focused-cov" ]]; then
+            pytest_args+=(
+              --cov=backend.api.external.v1.routes
+              --cov=backend.api.features.blocks.routes
+              --cov=backend.api.features.graph_executions.review.service
+              --cov=backend.blocks.time_blocks
+              --cov=backend.copilot.tools.helpers
+              --cov=backend.executor.utils
+              --cov-branch
+              --cov-report=term-missing
+              --cov-report=json:linux-validation/exit-diagnostic-coverage.json
+              --cov-report=xml:linux-validation/exit-diagnostic-coverage.xml
+            )
           fi
-          exit "${command_status[1]}"
-
-      - name: Final only - original 17 cases and complete time block suite
-        if: ${{ always() && matrix.mode == 'final' }}
-        run: |
-          set -uo pipefail
-          mkdir -p linux-validation
+          # Keep pytest's plugin active; its per-test timer must not replace the repeat timer.
           set +e
-          timeout --signal=INT --kill-after=15s 150s \
-            poetry run pytest -vv --tb=short -o faulthandler_timeout=60 \
-            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[not-set-True-+0900]' \
-            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[UTC-True-+0000]' \
-            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[Invalid/Timezone-True-+0000]' \
-            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[None-True-+0000]' \
-            'backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone[UTC-False-+0900]' \
-            'backend/api/features/blocks/routes_test.py::test_execute_graph_block_forwards_execution_context[America/New_York]' \
-            'backend/api/features/blocks/routes_test.py::test_execute_graph_block_forwards_execution_context[not-set]' \
-            'backend/api/features/graph_executions/review/resume_reads_test.py::test_a_resumed_run_reads_its_user_and_settings_side_by_side_then_its_workspace[Europe/Paris]' \
-            'backend/api/features/graph_executions/review/resume_reads_test.py::test_a_resumed_run_reads_its_user_and_settings_side_by_side_then_its_workspace[not-set]' \
-            'backend/executor/run_start_reads_test.py::test_a_new_run_reads_its_user_and_settings_side_by_side_then_its_workspace[Europe/Paris]' \
-            'backend/executor/run_start_reads_test.py::test_a_new_run_reads_its_user_and_settings_side_by_side_then_its_workspace[not-set]' \
-            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[not-set-True-+0900]' \
-            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[Asia/Kolkata-True-+0530]' \
-            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[UTC-True-+0000]' \
-            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[Invalid/Timezone-True-+0000]' \
-            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[None-True-+0000]' \
-            'backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone[UTC-False-+0900]' \
-            backend/blocks/time_blocks_test.py \
-            --cov=backend \
-            --cov-branch \
-            --cov-report=term-missing \
-            --cov-report=json:linux-validation/focused-timezone-coverage.json \
-            --cov-report=xml:linux-validation/focused-timezone-coverage.xml \
-            --junitxml=linux-validation/focused-timezone.xml \
-            2>&1 | tee linux-validation/focused-timezone.log
+          timeout --signal=INT --kill-after=15s 180s \
+            poetry run python -c 'import faulthandler,sys,pytest;faulthandler.dump_traceback_later(30,repeat=True);raise SystemExit(pytest.main(sys.argv[1:]))' "${pytest_args[@]}" \
+            2>&1 | tee linux-validation/exit-diagnostic.log
           command_status=("${PIPESTATUS[@]}")
-          printf 'command_exit=%s\ntee_exit=%s\n' "${command_status[0]}" "${command_status[1]}" > linux-validation/focused-timezone-exit-codes.txt
+          printf 'command_exit=%s\ntee_exit=%s\n' "${command_status[0]}" "${command_status[1]}" > linux-validation/exit-diagnostic-exit-codes.txt
           if (( command_status[0] != 0 )); then
             exit "${command_status[0]}"
           fi
@@ -207,7 +194,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: autogpt-16726-diagnose-${{ matrix.mode }}-${{ matrix.sha }}
+          name: autogpt-16726-exit-diagnose-${{ matrix.mode }}-${{ env.TARGET_SHA }}
           path: autogpt_platform/backend/linux-validation/
           if-no-files-found: error
           retention-days: 7
