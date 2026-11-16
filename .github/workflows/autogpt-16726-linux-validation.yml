@@ -1,0 +1,111 @@
+name: AutoGPT 16726 focused Linux validation
+
+on:
+  push:
+    branches: [codex/ci-autogpt-16726-linux-20261116]
+    paths: [.github/workflows/autogpt-16726-linux-validation.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autogpt-16726-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-linux:
+    if: github.repository == 'inchang-ing/AutoGPT'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+        working-directory: autogpt_platform/backend
+    env:
+      TARGET_SHA: 64925b2e0e1c59790152540f499c3b35d795a2dd
+      VALIDATION_MODE: baseline
+      CI: "true"
+      PLAIN_OUTPUT: "true"
+      RUN_ENV: local
+      JWT_JWKS_URL: http://localhost:3000/api/auth/jwks
+
+    steps:
+      - name: Checkout the reviewed source commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: 64925b2e0e1c59790152540f499c3b35d795a2dd
+          persist-credentials: false
+
+      - name: Verify the source and validation mode
+        run: |
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          case "$VALIDATION_MODE" in baseline|final) ;; *) exit 1 ;; esac
+          printf 'source=%s\nmode=%s\n' "$TARGET_SHA" "$VALIDATION_MODE"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the repository's Poetry version
+        run: |
+          POETRY_VERSION=$(python ../../.github/workflows/scripts/get_package_version_from_lockfile.py poetry)
+          curl --fail --silent --show-error --location https://install.python-poetry.org | POETRY_VERSION="$POETRY_VERSION" python3 -
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install the locked project and development dependencies
+        run: poetry install --no-interaction
+
+      - name: Generate Prisma client and type stub
+        uses: ./.github/actions/generate-prisma-client
+
+      - name: Generate only ephemeral test encryption material
+        run: |
+          echo "ENCRYPTION_KEY=$(openssl rand -base64 32 | tr '+/' '-_')" >> "$GITHUB_ENV"
+
+      - name: Record the real runtime and source paths
+        run: |
+          mkdir -p linux-validation
+          poetry run python - <<'PY' | tee linux-validation/runtime.log
+          import platform
+          import sys
+          import autogpt_libs
+          import backend
+          import prisma
+          print(platform.platform())
+          print(sys.version)
+          print(sys.executable)
+          for module in (backend, autogpt_libs, prisma):
+              print(module.__name__, module.__file__)
+          PY
+          poetry show --no-ansi > linux-validation/dependencies.txt
+
+      - name: Run all required architecture and block harness tests
+        run: |
+          set -o pipefail
+          poetry run pytest -q --tb=short \
+            backend/util/architecture*_test.py \
+            backend/blocks/test/test_block.py \
+            --junitxml=linux-validation/mandatory.xml \
+            2>&1 | tee linux-validation/mandatory.log
+
+      - name: Run the four timezone regression functions
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          poetry run pytest -q --tb=long \
+            backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone \
+            backend/api/features/blocks/routes_test.py::test_execute_graph_block_forwards_execution_context \
+            backend/api/features/graph_executions/review/resume_reads_test.py::test_a_resumed_run_reads_its_user_and_settings_side_by_side_then_its_workspace \
+            backend/executor/run_start_reads_test.py::test_a_new_run_reads_its_user_and_settings_side_by_side_then_its_workspace \
+            --junitxml=linux-validation/regressions.xml \
+            2>&1 | tee linux-validation/regressions.log
+
+      - name: Preserve raw reports without changing test outcomes
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: autogpt-16726-linux-${{ env.VALIDATION_MODE }}-${{ env.TARGET_SHA }}
+          path: autogpt_platform/backend/linux-validation/
+          if-no-files-found: error
+          retention-days: 7
