@@ -17,13 +17,32 @@ jobs:
     if: github.repository == 'inchang-ing/AutoGPT'
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    services:
+      clamav:
+        image: clamav/clamav-debian:latest
+        ports:
+          - 3310:3310
+        env:
+          CLAMAV_NO_FRESHCLAMD: "false"
+          CLAMD_CONF_StreamMaxLength: 50M
+          CLAMD_CONF_MaxFileSize: 100M
+          CLAMD_CONF_MaxScanSize: 100M
+          CLAMD_CONF_MaxThreads: 4
+          CLAMD_CONF_ReadTimeout: 300
+        options: >-
+          --health-cmd "clamdscan --version || exit 1"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+          --health-start-period 180s
+
     defaults:
       run:
         shell: bash
         working-directory: autogpt_platform/backend
     env:
-      TARGET_SHA: dbfe17569532353448e9577b2f62d1150ac79ee8
-      VALIDATION_MODE: baseline
+      TARGET_SHA: 623b2cac752f85ff4e79e7b202a9e969d5291da7
+      VALIDATION_MODE: final
       CI: "true"
       PLAIN_OUTPUT: "true"
       RUN_ENV: local
@@ -33,7 +52,7 @@ jobs:
       - name: Checkout the reviewed source commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: dbfe17569532353448e9577b2f62d1150ac79ee8
+          ref: 623b2cac752f85ff4e79e7b202a9e969d5291da7
           persist-credentials: false
 
       - name: Verify the source and validation mode
@@ -80,6 +99,31 @@ jobs:
           PY
           poetry show --no-ansi > linux-validation/dependencies.txt
 
+      - name: Wait for the real ClamAV daemon
+        shell: bash
+        env:
+          CLAMAV_CONTAINER: ${{ job.services.clamav.id }}
+        run: |
+          test -n "$CLAMAV_CONTAINER"
+          clamav_ready=false
+          for _ in $(seq 1 60); do
+            if nc -z localhost 3310; then
+              clamav_ready=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$clamav_ready" != "true" ]]; then
+            docker logs "$CLAMAV_CONTAINER" >&2
+            echo "ClamAV failed to start" >&2
+            exit 1
+          fi
+          if ! timeout 10 bash -c 'echo "PING" | nc localhost 3310'; then
+            docker logs "$CLAMAV_CONTAINER" >&2
+            echo "ClamAV is not responding to PING" >&2
+            exit 1
+          fi
+
       - name: Run all required architecture and block harness tests
         run: |
           set -o pipefail
@@ -89,18 +133,29 @@ jobs:
             --junitxml=linux-validation/mandatory.xml \
             2>&1 | tee linux-validation/mandatory.log
 
-      - name: Run the five timezone regression functions
+      - name: Run affected timezone entry point suites with branch coverage
         if: ${{ !cancelled() }}
         run: |
-          set -o pipefail
-          poetry run pytest -q --tb=long \
-            backend/api/external/v1/routes_test.py::test_execute_time_block_uses_the_profile_or_configured_timezone \
-            backend/api/features/blocks/routes_test.py::test_execute_graph_block_forwards_execution_context \
-            backend/api/features/graph_executions/review/resume_reads_test.py::test_a_resumed_run_reads_its_user_and_settings_side_by_side_then_its_workspace \
-            backend/executor/run_start_reads_test.py::test_a_new_run_reads_its_user_and_settings_side_by_side_then_its_workspace \
-            backend/copilot/tools/helpers_test.py::test_execute_time_block_uses_profile_or_configured_timezone \
-            --junitxml=linux-validation/regressions.xml \
-            2>&1 | tee linux-validation/regressions.log
+          set -euo pipefail
+          mkdir -p linux-validation
+
+          # These six files contain all 17 baseline parameter cases, the complete real
+          # time/date-block suite, and the existing tests around each touched producer.
+          # Keep pytest's configured fixtures/markers and original skip policy unchanged.
+          poetry run pytest -q --tb=short \
+            backend/blocks/time_blocks_test.py \
+            backend/api/external/v1/routes_test.py \
+            backend/api/features/blocks/routes_test.py \
+            backend/api/features/graph_executions/review/resume_reads_test.py \
+            backend/executor/run_start_reads_test.py \
+            backend/copilot/tools/helpers_test.py \
+            --cov=backend \
+            --cov-branch \
+            --cov-report=term-missing \
+            --cov-report=json:linux-validation/affected-coverage.json \
+            --cov-report=xml:linux-validation/affected-coverage.xml \
+            --junitxml=linux-validation/affected.xml \
+            2>&1 | tee linux-validation/affected.log
 
       - name: Preserve raw reports without changing test outcomes
         if: ${{ always() }}
